@@ -1,7 +1,7 @@
 ---
 title: 'Project 2: Data Mining, Classification, Prediction'
 author: "SDS322E"
-date: ''
+date: '12/10/21'
 output:
   html_document:
     toc: yes
@@ -15,6 +15,7 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, eval = TRUE, fig.align = "center", warning = F, message = F,
 tidy=TRUE, tidy.opts=list(width.cutoff=60), R.options=list(max.print=100))
+knitr::knit_engines$set(python = reticulate::eng_python)
 
 class_diag <- function(score, truth, positive, cutoff=.5){
 
@@ -46,18 +47,21 @@ class_diag <- function(score, truth, positive, cutoff=.5){
 
 # Mining, Classification, Prediction
 
-## Name and EID here
+## David Yang dy4652
 
 ### Introduction 
 
-Paragraph or two introducing your datasets and variables, why they are interesting to you, etc. See instructions for more information
+The data I used for this project was obtained from the kaggle website. It contains a list of cards from the 
+online collectible card game, Hearthstone, up to 2016. Each row data includes information about the cost of the card (in mana),
+the attack, health, rarity, name, and class (class of a card means what type of character can use this card, neutral means
+all characters can use this card in their deck.). The dataset was filtered out to only include minion cards (no spells or weapons)and cards that are collectible (i.e. only cards that can be obtained from card packs). Before filtering, the dataset had 2,819 observations. Afterwards, there are 1,193 observations. 
+
 
 ```{R}
 library(tidyverse)
-# read your datasets in here, e.g., with read_csv()
-
-# if your dataset needs tidying, do so here
-
+cards <- read_csv("cards.csv")
+cards <- cards %>% filter(type == "MINION") %>% filter(!is.na(collectible)) %>% select(2:10) %>%
+  mutate("isLegendary" = rarity=="LEGENDARY") %>% select(-"text") 
 # any other code here
 ```
 
@@ -65,73 +69,172 @@ library(tidyverse)
 
 ```{R}
 library(cluster)
-# clustering code here
+library(GGally)
+pam_dat <- cards %>% select(cost, attack, health)
+sil_width<-vector()
+for(i in 2:10){  
+  pam_fit <- pam(pam_dat, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+sil_width[2]
+ggplot()+geom_line(aes(x=1:10,y=sil_width))+scale_x_continuous(name="k",breaks=1:10)
+
+pam1 <- pam_dat %>% pam(k=2)
+pamclust<-pam_dat %>% mutate(cluster=as.factor(pam1$clustering))
+ggpairs(pamclust[1:3], aes(color=pamclust$cluster))
+pam1$medoids
 ```
 
-Discussion of clustering here
+The ideal cluster amount was found to be 2. The first cluster is centered around a cost of 6 mana, 5 attack,
+and 5 health. The second cluster is centered around a cost of 3 mana, 2 attack, and 3 health. There was a negative
+slope in the boundary between cost and the other 2 variables (with cost as the x-axis), meaning that cards with
+a relatively high cost but low attack/health would still be found in the first cluster (red) and vice versa. A negative slope
+can also be found in the cluster boundary between attack and health (attack as x-axis) so cards with a relatively
+low attack but relatively high health can be found in the first cluster (red) and vice versa. The clustering solution
+was not that good as the silhouette width for this solution was .449.
+
     
     
 ### Dimensionality Reduction with PCA
 
 ```{R}
-# PCA code here
+cards_num <- cards %>% select_if(is.numeric) %>% scale
+rownames(cards_num) <- cards$name
+cards_pca <- princomp(cards_num)
+summary(cards_pca, loadings = T)
+cardsdf<-data.frame(PC1=cards_pca$scores[, 1],PC2=cards_pca$scores[, 2])
+ggplot(cardsdf, aes(PC1, PC2)) + geom_point()
+
 ```
 
-Discussions of PCA here. 
+The first PC accounts for about 80% of the variance. Scoring high on the PC1 means that the card has a high
+cost, attack, and health. Scoring low means that the card is low cost, attack, and health. The second PC accounts
+for 13% of the variance. Scoring high on PC2 means that the card has a high attack but low health. Scoring low on
+PC2 means that the card has a low attack but high health.
 
 ###  Linear Classifier
 
 ```{R}
-# linear classifier code here
+fit <- glm(isLegendary ~ cost + attack + health, data=cards, family="binomial")
+score <- predict(fit, type="response")
+score %>% round(3)
+class_diag(score,truth=cards$isLegendary, positive=1)
+table(truth = cards$isLegendary, predictions = score>.5)
 ```
 
 ```{R}
-# cross-validation of linear classifier here
+k =10 #choose number of folds
+data<-cards[sample(nrow(cards)),] #randomly order rows
+folds<-cut(seq(1:nrow(cards)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  ## Create training and test sets
+  train<-data[folds!=i,] 
+  test<-data[folds==i,]
+  truth<-test$isLegendary ## Truth labels for fold i
+  ## Train model on training set (all but fold i)
+  fit<-glm(isLegendary ~ cost + attack + health, data=cards, family="binomial")
+  ## Test model on test set (fold i) 
+  probs<-predict(fit,newdata = test,type="response")
+  ## Get diagnostics for fold i
+  diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+
+summarize_all(diags,mean)
 ```
 
-Discussion here
+The logistic regression formula correlates positively with cost, attack, and health on determining
+whether or not a card is legendary. The AUC for the logistic regression model was .81 which makes it a pretty
+good predictor. The AUC after k-fold cross validation was about .80 which means that the model is not overfitting and
+can predict new observations quite well.
 
 ### Non-Parametric Classifier
 
 ```{R}
 library(caret)
-# non-parametric classifier code here
+knn_fit <- knn3(isLegendary ~ attack + cost + health, data=cards)
+y_hat_knn <- predict(knn_fit,cards)
+class_diag(y_hat_knn[,2], truth = cards$isLegendary, positive="TRUE")
+table(truth= cards$isLegendary,
+      prediction= factor(y_hat_knn[,2]>.5, levels=c("FALSE","TRUE")))
 ```
 
 ```{R}
-# cross-validation of np classifier here
+k =10 #choose number of folds
+data<-cards[sample(nrow(cards)),] #randomly order rows
+folds<-cut(seq(1:nrow(cards)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  ## Create training and test sets
+  train<-data[folds!=i,] 
+  test<-data[folds==i,]
+  truth<-test$isLegendary ## Truth labels for fold i
+  ## Train model on training set (all but fold i)
+  fit<-knn3(isLegendary ~ cost + attack + health, data=cards)
+  ## Test model on test set (fold i) 
+  probs<-predict(fit,newdata = test)
+  ## Get diagnostics for fold i
+  diags<-rbind(diags,class_diag(probs[,2],truth, positive=1))
+}
+summarize_all(diags,mean)
 ```
 
-Discussion
-
+The knn model has an AUC value of .88 meaning that it is a good classifier on whether or not a card is legendary.
+The AUC for the k-fold CV was .87 meaning that the model is not overfitting. The AUC value for the knn model is higher
+than the logistic regression model meaning using the knn model will provide more accurate classifications.
 
 ### Regression/Numeric Prediction
 
 ```{R}
-# regression model code here
+fit<-lm(cost~rarity+playerClass,data=cards)
+yhat<-predict(fit) 
+mean((cards$cost-yhat)^2)
 ```
 
 ```{R}
-# cross-validation of regression model here
+k=10 #choose number of folds
+data<-cards[sample(nrow(cards)),] #randomly order rows
+folds<-cut(seq(1:nrow(cards)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+  test<-data[folds==i,]
+
+  fit<-lm(cost~rarity+playerClass,data=train)
+
+  yhat<-predict(fit,newdata=test)
+
+  diags<-mean((test$cost-yhat)^2) 
+}
+mean(diags) 
 ```
 
-Discussion
+The model does not show signs of overfitting as the difference between the means of the
+regression model and the k-fold CV is not very high. From the linear regression model,
+we can see that epics and legendaries tend to contribute the most to the cost of a card, meaning that on average
+epics and legendaries have higher costs. Interestingly, the class of the card all have negative correelations,
+with hunter having the most negative correlation and warlock having the least negative.
 
 ### Python 
 
 ```{R}
 library(reticulate)
+r_object <- 2
+use_python("/usr/bin/python3", required = F)
 ```
 
 ```{python}
-# python code here
+hello = 2
+print(hello**r.r_object == 4)
 ```
 
 Discussion
 
 ### Concluding Remarks
 
-Include concluding remarks here, if any
+It was a fun experiment. Initially I wanted to use another binary variable, but there were so many TRUE's that 
+the predictor models just predicted true always, but I do realize that the binary operator I did use
+was pretty similar to the pokemon dataset we did in class (detecting whether or not a pokemon was legendary).
 
 
 
